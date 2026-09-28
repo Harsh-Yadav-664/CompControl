@@ -1,3 +1,2 @@
-"""CompControl's safe, minimal assistant core."""
-
-__version__ = "0.1.0"
+"""CompControl: deterministic commands and explicit consent."""
+__version__ = '0.2.0'
