@@ -14,7 +14,7 @@ class ActionsTests(unittest.TestCase):
     def test_browser_argv_never_shell(self,popen,path,system):
         result=self.execute(Action('search','youtube','hello & --evil', 'chrome'))
         args,kwargs=popen.call_args
-        self.assertEqual(args[0],['/trusted/chrome.exe','https://www.youtube.com/results?search_query=hello+%26+--evil'])
+        self.assertEqual(args[0],[str(Path('/trusted/chrome.exe')),'https://www.youtube.com/results?search_query=hello+%26+--evil'])
         self.assertFalse(kwargs['shell'])
         self.assertEqual(result['status'],'executed')
     @patch('compcontrol.actions.platform.system',return_value='Windows')
