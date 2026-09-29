@@ -1,0 +1,31 @@
+COMPCONTROL 0.4.0 - WINDOWS NATIVE SOURCE PACKAGE
+
+1. Extract ALL files from this ZIP to a new folder. Do not run inside the ZIP.
+2. Install standard Python 3.12 (64-bit) from python.org/downloads/windows/.
+   Enable Tcl/Tk and IDLE, the Python launcher and Add Python to PATH.
+3. Double-click Start CompControl.cmd (normal window) or Start Widget.cmd.
+   No Ollama, GPU, Node, Docker or pip packages required.
+4. Test: open yt and search for mr whose the boss
+   Plan request > Review & approve > Allow once.
+5. AI settings > Groq / Gemini / NVIDIA NIM (cloud) > paste YOUR key in the app
+   > Test AI setup > Apply for this session. Free quotas depend on your account.
+   The model runs remotely. Keys/settings are session-only, not saved to disk.
+
+The assistant has a native window; visiting YouTube still opens your browser.
+If you see the old green browser page, close it and use this folder's launcher.
+If launch fails, double-click Check Windows Setup.cmd for diagnostics.
+
+Full guide: docs/windows-quickstart.md
+Manual start from this folder: py -3 -m compcontrol
+Compact/pinned: py -3 -m compcontrol --widget
+Do NOT use --web or --demo when testing real Windows actions.
+
+This is source, not a signed EXE installer. Windows rendering/hotkeys and actual
+provider requests have not been tested in this Linux sandbox. Windows dispatch
+is implemented and covered with mocked tests. No background service or web
+server starts in native mode. Close the app to exit.
+
+New: Discover apps (packaged Start entries or choose trusted .exe), Project files
+(preview exact replacement/export patch only), explicit HTTPS navigation and
+ChatGPT research handoff. No automatic installs, file edits/deletes or ChatGPT submission.
+See docs/capable-assistant.md for details and current limitations.

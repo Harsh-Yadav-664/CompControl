@@ -11,6 +11,7 @@ SITES = {
     'google': 'https://www.google.com/', 'youtube': 'https://www.youtube.com/',
     'spotify': 'https://open.spotify.com/', 'github': 'https://github.com/',
     'gmail': 'https://mail.google.com/', 'maps': 'https://maps.google.com/',
+    'chatgpt': 'https://chatgpt.com/',
 }
 BROWSERS = {'default', 'chrome', 'brave', 'edge'}
 MEDIA_KEYS = {'play_pause': 0xB3, 'next': 0xB0, 'previous': 0xB1,
@@ -36,7 +37,10 @@ class Plan:
     title: str
     message: str
     actions: tuple[Action, ...] = ()
+    intent: str = ''
+    query: str = ''
 
     def to_dict(self):
         return {'title': self.title, 'message': self.message,
-                'actions': [a.to_dict() for a in self.actions]}
+                'actions': [a.to_dict() for a in self.actions],
+                'intent': self.intent, 'query': self.query}

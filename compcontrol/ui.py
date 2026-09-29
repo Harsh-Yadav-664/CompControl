@@ -1,4 +1,4 @@
-"""Legacy UI entry point; delegates to the shared local command center."""
+"""Compatibility UI entry point; launches the native desktop window by default."""
 from .__main__ import main
 
 if __name__ == '__main__':

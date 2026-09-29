@@ -1,4 +1,4 @@
-"""Opt-in text-only AI. Model responses cannot be interpreted as actions."""
+"""Opt-in text and structured planning transport. No execution authority."""
 import json
 import os
 import threading
@@ -74,31 +74,62 @@ class TextProvider:
             urllib.request.ProxyHandler({}), NoRedirect())
 
     def answer(self, prompt, persona='jarvis'):
-        if self.config.kind == 'off':
-            raise ProviderError('AI is off. Configure a local model before explicitly asking AI.')
-        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 2000:
-            raise ProviderError('AI questions must contain 1–2000 characters.')
-        if not self._lock.acquire(blocking=False):
-            raise ProviderError('An AI request is already in progress. Wait for it to finish.')
-        try:
-            return self._answer(prompt, persona)
-        finally:
-            self._lock.release()
-
-    def _answer(self, prompt, persona):
-        cfg = self.config
         system = ('You are ' + ('Friday' if persona == 'friday' else 'Jarvis') +
                   ', a concise text-only assistant inside CompControl. You cannot execute tools, browse, '
                   'read files, see the screen or verify desktop state. Never claim that you performed '
                   'an action. Suggest supported commands as text if useful. Do not request secrets.')
+        return self._request(prompt, system)
+
+    def propose(self, prompt, browser='default'):
+        from .ai_planner import SYSTEM, parse_proposal
+        from .planner import clean
+        raw = self._request(clean(prompt), SYSTEM, structured=True)
+        plan = parse_proposal(raw, browser)
+        # An inferred domain is not a grounded destination. Require an exact explicit
+        # URL in the approved request; no model-authored download/install link.
+        import re
+        supplied = set(re.findall(r'https://[^\s]+', prompt))
+        if any(a.kind == 'navigate' and a.target not in supplied for a in plan.actions):
+            raise ProviderError('AI proposed a URL not explicitly present in your request. '
+                                'Paste the exact HTTPS address or request a web search instead.')
+        return plan
+
+    def _request(self, prompt, system, structured=False):
+        if self.config.kind == 'off':
+            raise ProviderError('AI is off. Open AI settings to configure a model.')
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 2000:
+            raise ProviderError('AI requests must contain 1–2000 characters.')
+        if not self._lock.acquire(blocking=False):
+            raise ProviderError('An AI request is already in progress. Wait for it to finish.')
+        try:
+            return self._complete(prompt, system, structured)
+        finally:
+            self._lock.release()
+
+    def _complete(self, prompt, system, structured=False):
+        cfg = self.config
         messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': prompt}]
         if cfg.kind == 'ollama':
-            url = cfg.base_url + '/api/chat'
+            url = cfg.base_url.rstrip('/') + '/api/chat'
             body = {'model': cfg.model, 'messages': messages, 'stream': False,
                     'keep_alive': '2m', 'options': {'num_predict': 512, 'num_ctx': 4096}}
         else:
-            url = cfg.base_url + '/chat/completions'
+            url = cfg.base_url.rstrip('/') + '/chat/completions'
             body = {'model': cfg.model, 'messages': messages, 'stream': False, 'max_tokens': 512}
+        if structured and cfg.kind == 'ollama':
+            body['format'] = 'json'
+        # Only documented hosted adapters get vendor options; custom APIs stay generic.
+        base = cfg.base_url.rstrip('/')
+        if structured and base in {
+                'https://api.groq.com/openai/v1',
+                'https://generativelanguage.googleapis.com/v1beta/openai'}:
+            body['response_format'] = {'type': 'json_object'}
+        if base == 'https://api.groq.com/openai/v1' and cfg.model.startswith('openai/gpt-oss-'):
+            body['reasoning_effort'] = 'low'
+            body['max_tokens'] = 2048  # Include reasoning budget, not just final JSON.
+        if base == 'https://generativelanguage.googleapis.com/v1beta/openai' and cfg.model == 'gemini-2.5-flash-lite':
+            body['extra_body'] = {'google': {'thinking_config': {'thinking_budget': 0}}}
+
         headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
         if cfg.kind == 'openai' and cfg.api_key:
             headers['Authorization'] = 'Bearer ' + cfg.api_key
@@ -109,14 +140,26 @@ class TextProvider:
                 if len(raw) > LIMIT:
                     raise ProviderError('Provider response exceeded the size limit.')
                 data = json.loads(raw)
+                if cfg.kind != 'ollama' and data['choices'][0].get('finish_reason') == 'length':
+                    raise ProviderError('The model hit its output limit. No proposal was accepted. '
+                                        'Choose a non-reasoning text model or shorten the request.')
                 answer = data['message']['content'] if cfg.kind == 'ollama' else data['choices'][0]['message']['content']
                 if not isinstance(answer, str) or not answer.strip():
                     raise ValueError()
-                return answer[:12000]
+                if len(answer) > 12000:
+                    raise ProviderError('AI output was too long; no proposal was accepted.')
+                return answer
         except ProviderError:
             raise
         except urllib.error.HTTPError as exc:
             # Never include response bodies, headers, credentials or request object repr.
-            raise ProviderError(f'Provider returned HTTP {exc.code}. Check the model, endpoint and account settings.') from None
-        except (OSError, ValueError, KeyError, IndexError, TypeError):
+            hints = {
+                401: 'API key rejected. Paste a valid key for the selected provider in AI settings.',
+                403: 'This key/account cannot access the model. Check provider permissions and region eligibility.',
+                404: 'Model or endpoint not found. Copy a currently available text model ID from the provider console.',
+                429: 'Provider quota or rate limit reached. Check your free quota/reset time; no retry or paid fallback was made.',
+            }
+            raise ProviderError(f'Provider HTTP {exc.code}: ' + hints.get(exc.code,
+                'Request failed. Check the model, endpoint and account settings. No automatic retry was made.')) from None
+        except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError, RecursionError):
             raise ProviderError('AI request failed or timed out. Check the local service/endpoint and model. No action was taken.') from None

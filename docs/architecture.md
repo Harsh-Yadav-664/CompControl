@@ -1,37 +1,44 @@
-# Architecture · v0.2
+# Architecture · native desktop incremental assistant
 
-## Implemented
+## Primary flow
 
 ```text
-CLI / local browser command center
-           │ explicit user request
-           ▼
-Planner (offline, no I/O) → immutable typed Action → Broker
-                                                  │
-                               expiring single-use approval
-                                                  │
-                                     Native Windows consent
-                                                  │
-                              revalidate pause/expiry at dispatch
-                                                  │
-                                        WindowsExecutor
-
-Ask AI + explicit disclosure → TextProvider → plain text only
-                                 (no path to the broker)
+Native Tk window → offline planner ───────────────────────────────┐
+       │                                                        │
+       └→ user-approved AI disclosure → provider (worker thread) │
+                 → strict JSON proposal parser → local summary ─┤
+                                                                ▼
+                            Broker: immutable plan / expiring one-use approval
+                                                                │
+                                     native confirmation (Tk main thread)
+                                                                │
+                                     validity check at dispatch → WindowsExecutor
 ```
 
-`planner.py` recognizes bounded phrases; `models.py` defines immutable contracts; `actions.py` validates again at the OS boundary. `broker.py` serializes execution, consumes approval before dispatch, and revokes pending/waiting work on pause or clear. Failures are not automatically retried. Native consent defaults to denial and expires with the request. Once a dispatch is committed, pause cannot recall it.
+Default `python -m compcontrol` opens `desktop.py`; it does not start `server.py` or a browser. The optional `--web` interface remains for diagnostics/demo, with text-only chat. CLI uses offline skills and the same broker/executor. No mode executes arbitrary model text.
 
-`server.py` serves allowlisted static assets and a small JSON API. The local token arrives via a URL fragment, is removed from the address bar, and is kept only in JavaScript memory. No credentials in cookies or browser storage. Local mode enforces exact loopback Host and Origin plus bearer authentication; external demo mode has a physically separate no-op executor and disabled AI. Preview sessions are shared, public, in-memory simulations, not remote desktop sessions.
+## AI interpretation boundary
 
-API: `GET /api/state`; `POST /api/plan`, `/api/confirm`, `/api/cancel`, `/api/pause`, `/api/clear`, `/api/chat`. Confirm accepts only a server-issued approval ID, never a client action body. No permissive CORS. JSON request/response bounds and provider timeouts apply. Activity is a 60-event memory ring with labels/outcomes only.
+`TextProvider.propose()` sends a single approved request plus a fixed capability schema. Local Ollama uses JSON mode; OpenAI-compatible APIs receive the schema in the system prompt without assuming vendor-specific tool APIs. `ai_planner.parse_proposal()` rejects extra/duplicate keys, action arrays, arbitrary code/invented URLs, unsupported targets, malformed types, oversized or hidden-control-bearing text. Action summaries are generated locally, not taken from model prose. A message-only response has no action path. `actions.validate()` runs again in the broker and executor.
 
-## Technology decision
+Network I/O runs in a daemon worker, which only puts results into a queue. All widgets and parented consent windows stay on the Tk thread. An application revision discards late UI results; a separate broker-issued, one-use, expiring interpretation ticket prevents a late model response from creating a valid approval after a new request, edit, Pause, Cancel or Clear. Already-sent network traffic cannot be recalled; no automatic retry occurs.
 
-Python standard library + static HTML/CSS/JS keeps this source prototype dependency-free and easy to audit. Windows Python includes Tk for the independent consent window. The existing browser supplies rendering, avoiding a bundled Chromium runtime. This supersedes the earlier provisional Tk-only chat / .NET suggestion; benchmark before choosing a long-term native shell. Python's HTTP server is **not an internet-facing production server**.
+Planning is distinct from authority. Even a schema-valid model proposal can misunderstand intent. The user reviews exact action, destination and browser, then confirms in a separate native dialog. No automatic multi-step execution or blanket permission. Failures consume approval; they do not retry.
 
-Jarvis and Friday are presentation/persona choices on one capability engine, not two permission-bearing agents. AI is opt-in, single-turn and text-only. Ollama uses loopback HTTP; OpenAI-compatible providers require HTTPS. Redirects and environment HTTP proxies are disabled to avoid credential forwarding. Secrets come from the process launch environment; a credential-manager backend remains future work.
+## Desktop and lightweight scope
+
+Python's Tcl/Tk window, slate/violet palette, optional compact layout and topmost toggle. A Windows `RegisterHotKey` message thread receives only Ctrl+Alt+Space activation, not text or keystroke history; a queue marshals summons onto Tk. Conflicting registration is reported, and the app remains accessible on the taskbar. Closing exits and unregisters the shortcut. No startup/tray agent, inference engine, browser runtime or network listener is bundled. Lightweight is an architectural aim, not a benchmark claim.
+
+Provider settings entered in the native app live only in process memory; environment defaults remain supported. Jarvis/Friday share permissions. Read-only exact destinations support copy/review. Activity is a bounded 60-event in-memory label/status ring, without raw requests or query strings.
+
+## Optional web surface
+
+`server.py` serves allowlisted assets and a bounded JSON API. Local mode enforces exact loopback Host/Origin and an in-memory bearer token (delivered in a URL fragment), CSP and native consent. Network/demo mode uses a no-op executor and disables all providers. Python's HTTP server is not production internet infrastructure. Native use does not inherit this listening surface.
+
+## Evolving target grounding
+
+See [broader assistant architecture](capable-assistant.md). Discovery is local-only: a scan produces ephemeral app selection handles; AI can request discovery but cannot choose the handle. Classic app shortcuts are not executed; a manually selected `.exe` is fingerprinted and rechecked before launch. HTTPS navigation is exact-request-grounded when AI proposed. Project files are user-selected; only preview/export of an exact change is currently offered, never a direct source edit. The one-effect broker and no blanket approval remain. Additional tools need their own target-identity/side-effect rules rather than an ever-growing name allowlist.
 
 ## Deferred
 
-Local speech recognition/TTS loaded on demand; OAuth-backed Spotify integration if account/API eligibility allows; richer bounded skills; signed Windows distribution. Android must be a paired client with authenticated TLS, scoped per-device grants, revocation and replay defense—not an open desktop HTTP port. No third-party plugin execution until isolation and review rules exist.
+OS credential vault and signed distribution; measured resource/latency budget; accessible native styling refinements; optional push-to-talk; supported OAuth media control; safe direct file edits, deletes and applied patches. Android needs authenticated pairing, TLS, per-device grants, revocation and replay protection—not an exposed desktop HTTP port.

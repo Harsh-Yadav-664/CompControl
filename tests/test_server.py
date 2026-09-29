@@ -33,7 +33,7 @@ class ServerTests(unittest.TestCase):
     def test_full_approval_roundtrip(self):
         status,data,_=self.request('/api/plan',{'text':'open Spotify and play sad Hindi songs'})
         self.assertEqual(status,200);plan=json.loads(data)
-        self.assertIn('spotify.com',plan['destinations'][0])
+        self.assertTrue(plan['destinations'][0].startswith('spotify:search:'))
         status,data,_=self.request('/api/confirm',{'approval_id':plan['approval_id']})
         self.assertEqual(status,200);self.assertEqual(json.loads(data)['status'],'simulated')
         self.assertEqual(self.request('/api/confirm',{'approval_id':plan['approval_id']})[0],409)

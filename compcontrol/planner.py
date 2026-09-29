@@ -11,10 +11,11 @@ from .models import Action, APP_NAMES, BROWSERS, MEDIA_NAMES, Plan, SITES
 MAX_REQUEST = 1000
 MAX_QUERY = 300
 BIDI = set('\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069')
-HELP = ('Open Calculator, Notepad, Paint, File Explorer, Settings, Chrome or Brave. '
-        'Search Google, YouTube, Spotify or Maps. Open Spotify liked songs. '
-        'Control media keys, check the time, or calculate 18 * 25. '
-        'Every desktop action is previewed first. No shell, file edits or automatic playback selection.')
+HELP = ('Open built-in apps or discover any app registered in the Windows Start menu. '
+        'Open an explicit HTTPS address, search the web, or prepare a ChatGPT research handoff. '
+        'Use Project files to select one project/file and preview an exact-text change as a patch. '
+        'App discovery and project selection stay local. Installs, direct file writes/deletes, '
+        'and autonomous browser interaction are not implemented yet. Every launch is previewed.')
 
 
 def clean(text: str, limit: int = MAX_REQUEST) -> str:
@@ -62,13 +63,50 @@ def search(site: str, query: str, browser: str) -> Plan:
     return Plan(f'Search {label}', f'{note} Browser: {browser}.', (Action('search', site, query, browser),))
 
 
+def follow_up(intent, query='', browser='default'):
+    query = clean(query, MAX_QUERY)
+    if intent == 'find_app':
+        return Plan('Choose an installed app',
+                    'Use Discover apps to read the Windows Start menu locally. Select the exact app; '
+                    'names are not proof of publisher identity. No launch is approved by this request.',
+                    intent=intent, query=query)
+    if intent == 'file_workspace':
+        return Plan('Choose a project and file',
+                    'Use Project files. Select the project folder and exact file yourself. '
+                    'Preview an exact-text replacement and export a patch; originals stay unchanged. '
+                    'Files are not sent to AI. Direct editing/deletion is not implemented.',
+                    intent=intent, query=query)
+    if intent == 'research':
+        if not query:
+            return Plan('What should I research?', 'Include a specific topic for the research draft.')
+        return Plan('Prepare ChatGPT research',
+                    'Opens ChatGPT only. In ChatGPT, select New chat, choose Deep research if your account '
+                    'has access, paste the draft below and review its research plan. No text is submitted '
+                    'and no research job is started by CompControl.\n\nDraft to copy:\n'
+                    'Research this topic in depth: ' + query + '. Cite primary sources, compare alternatives, '
+                    'and clearly separate findings from uncertainty.',
+                    (Action('site', 'chatgpt', browser=browser),))
+    raise ValueError('Unknown follow-up.')
+
+
+def navigate(url, browser='default'):
+    from .actions import validate_url
+    validate_url(url)
+    return Plan('Open HTTPS destination',
+                'Review the full address and host. Website content is untrusted; navigation can trigger '
+                'a browser download. CompControl does not select a save path, run a downloaded file or '
+                'verify the site/publisher.', (Action('navigate', url, browser=browser),))
+
+
 def plan_request(text: str, browser: str = 'default') -> Plan:
     if browser not in BROWSERS:
         raise ValueError('Select a supported browser.')
     text = clean(text)
     text = re.sub(r'^(?:hey\s+)?(?:jarvis|friday)[,:]?\s+', '', text, flags=re.I)
-    text = re.sub(r'^(?:please|can you|could you)\s+', '', text, flags=re.I)
-    text = text.rstrip('?.!')
+    text = re.sub(r'^(?:(?:please|can you|could you|would you)\s+)+', '', text, flags=re.I)
+    # Do not strip meaningful URL punctuation or silently change its destination.
+    if 'https://' not in text:
+        text = text.rstrip('?.!')
     low = text.casefold()
     if not text:
         return Plan('Ready when you are', 'Type a request or choose a shortcut.')
@@ -93,6 +131,28 @@ def plan_request(text: str, browser: str = 'default') -> Plan:
         return Plan('Use the playback toggle', 'I cannot read your player state. Say “toggle playback” '
                     'to send a play/pause key, or ask for a Spotify search.')
 
+    match = re.fullmatch(r'(?:open|visit|download(?: from)?) (https://\S+)', text, re.I)
+    if match:
+        return navigate(match[1], browser)
+    match = re.fullmatch(r'(?:download and install|install or download|winget install|install|download) (?:the )?(.+?)(?: for windows)?', text, re.I)
+    if match:
+        software = clean(match[1], MAX_QUERY).strip(' .!?')
+        if not software or len(software) > 240:
+            return Plan('Which software?', 'Name the app; no download has started.')
+        query = f'{software} official download Windows'
+        return Plan('Find the official download page',
+                    'Opens Google results only. Verify the publisher/domain and installer yourself. '
+                    'CompControl has not downloaded, installed or run anything.',
+                    (Action('search', 'google', query, browser),))
+    match = re.fullmatch(r'(?:research|deep research|ask chatgpt to (?:do )?(?:deep )?research)(?: about| on)? (.+)', text, re.I)
+    if match:
+        return follow_up('research', match[1], browser)
+    if low in {'project files', 'edit project file', 'preview file change', 'open project files'}:
+        return follow_up('file_workspace')
+    match = re.fullmatch(r'(?:find|discover) (?:installed )?app(?:s)?(?: (.+))?', text, re.I)
+    if match:
+        return follow_up('find_app', match[1] or '')
+
     # Only this bounded composite is allowed: browser selection + one search.
     match = re.fullmatch(r'open (?:the )?(chrome|brave|edge)(?: browser)? and (.+)', text, re.I)
     if match:
@@ -108,9 +168,23 @@ def plan_request(text: str, browser: str = 'default') -> Plan:
     match = re.fullmatch(r'open spotify and (?:play|search(?: for)?) (.+)', text, re.I)
     if match:
         return search('spotify', match[1], browser)
+    match = re.fullmatch(r'(?:play|watch) (.+?) on (youtube|yt)', text, re.I)
+    if match:
+        return search('youtube', match[1], browser)
     match = re.fullmatch(r'(?:play|listen to) (.+?)(?: on spotify)?', text, re.I)
     if match:
         return search('spotify', match[1], browser)
+
+    # Opening a site and searching it is one navigation, not arbitrary chaining.
+    match = re.fullmatch(
+        r'(?:open|launch) (?:a |the |an? new )?(youtube|yt|spotify|google|maps)'
+        r'(?: tab| page| website)? (?:and|then|and then) (?:search(?: for)?|find|look for) (.+)',
+        text, re.I)
+    if match:
+        return search(match[1].lower().replace('yt', 'youtube'), match[2], browser)
+    match = re.fullmatch(r'(?:look for|look up|show me) (.+?) (?:on|in) (youtube|yt|spotify|google|maps)', text, re.I)
+    if match:
+        return search(match[2].lower().replace('yt', 'youtube'), match[1], browser)
 
     # Prefer site-specific search patterns before generic search. Preserve query case.
     for pattern in (
@@ -133,7 +207,8 @@ def plan_request(text: str, browser: str = 'default') -> Plan:
     match = re.fullmatch(r'(?:open|launch|start) (?:the )?(.+)', text, re.I)
     if match:
         target = match[1].lower()
-        target = {'file explorer': 'explorer', 'windows settings': 'settings',
+        target = {'yt': 'youtube', 'youtube tab': 'youtube', 'yt tab': 'youtube',
+                  'file explorer': 'explorer', 'windows settings': 'settings',
                   'google chrome': 'chrome', 'microsoft edge': 'edge',
                   'chrome browser': 'chrome', 'brave browser': 'brave'}.get(target, target)
         if target in APP_NAMES:
@@ -142,5 +217,10 @@ def plan_request(text: str, browser: str = 'default') -> Plan:
         if target in SITES:
             return Plan(f'Open {target.title()}', 'Opens a fixed HTTPS destination in your selected browser.',
                         (Action('site', target, browser=browser),))
-    return Plan('No action taken', 'That request is outside my safe toolkit. Try “help”, a shortcut, '
-                'or explicitly ask AI for a text answer. I cannot run shell commands, delete files or send messages.')
+        # An unresolved name is a discovery hint, never a path or command.
+        if (not re.search(r'(?:\b(?:and|then|run)\b|[\\/:;&|<>])', target, re.I)
+                and len(target) <= MAX_QUERY):
+            return follow_up('find_app', match[1])
+    return Plan('Let’s interpret that', 'I did not match a local skill. Use AI to interpret this request, '
+                'or choose Discover apps / Project files. AI can propose navigation and discovery '
+                'for your approval; it cannot approve its own actions or silently change files.')

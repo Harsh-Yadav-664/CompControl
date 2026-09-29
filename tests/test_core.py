@@ -40,6 +40,14 @@ class PlannerTests(unittest.TestCase):
 
     def test_user_examples(self):
         cases = {
+            'open yt and search for mr whose the boss': ('search', 'youtube', 'mr whose the boss'),
+            'open yt and search for Mrwhosetheboss': ('search', 'youtube', 'Mrwhosetheboss'),
+            'open a youtube tab and find Sidemen videos': ('search', 'youtube', 'Sidemen videos'),
+            'Could you please open a new YouTube tab and search for Sidemen': ('search', 'youtube', 'Sidemen'),
+            'open YouTube and then look for हिन्दी Music': ('search', 'youtube', 'हिन्दी Music'),
+            'show me Sidemen videos on YouTube': ('search', 'youtube', 'Sidemen videos'),
+            'watch Sidemen on YouTube': ('search', 'youtube', 'Sidemen'),
+            'play Sidemen videos on YouTube': ('search', 'youtube', 'Sidemen videos'),
             'open Spotify and play sad Hindi songs': ('search', 'spotify', 'sad Hindi songs'),
             'open Spotify and play my liked playlist': ('liked', 'spotify', ''),
             'open Chrome and search for Sidemen videos on YouTube': ('search','youtube','Sidemen videos'),
@@ -57,13 +65,17 @@ class PlannerTests(unittest.TestCase):
             self.assertFalse(plan_request(text).actions)
 
     def test_query_case_unicode_and_encoding(self):
-        for site in ('youtube','google','maps','spotify'):
+        for site in ('youtube','google','maps'):
             a = self.action(f'search {site} for हिन्दी Music & --flag="x" # ?')
             url = destination(a)
             self.assertTrue(url.startswith('https://'))
             self.assertNotIn(' ',url)
             self.assertFalse(urlsplit(url).fragment)
             self.assertIn('Music',unquote(url))
+        spotify = destination(self.action('search Spotify for हिन्दी Music'))
+        self.assertTrue(spotify.startswith('spotify:search:'))
+        self.assertIn('Music', unquote(spotify))
+        self.assertEqual(destination(self.action('open Spotify and play Maati')), 'spotify:search:Maati')
 
     def test_no_silent_truncation_or_control_chars(self):
         for text in ('x'*1001, 'search for '+'x'*301, 'search for evil\x00', 'open\ncalculator', 'search for \u202eexe'):

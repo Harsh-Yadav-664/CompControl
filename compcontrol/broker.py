@@ -6,8 +6,8 @@ from collections import deque
 from dataclasses import dataclass
 
 from .actions import destination, validate
-from .models import Plan
-from .planner import plan_request
+from .models import Action, Plan
+from .planner import plan_request, clean
 
 
 class BrokerError(ValueError):
@@ -41,6 +41,7 @@ class Broker:
         self._events = deque(maxlen=60)
         self._counter = 0
         self._generation = 0
+        self._interpretation = None
 
     def _record(self, title, status):
         self._counter += 1
@@ -60,31 +61,107 @@ class Broker:
                     'pending_id': self.pending.id if self.pending else None,
                     'busy': self._execution_lock.locked()}
 
+    def _invalidate(self):
+        # Caller holds the policy lock. Also revokes in-flight interpretation/consent.
+        self._generation += 1
+        self._interpretation = None
+        if self.pending:
+            self._record(self.pending.plan.title, 'superseded')
+        self.pending = None
+
+    def invalidate(self):
+        """Input/browser edits revoke old work without erasing activity."""
+        with self._lock:
+            self._invalidate()
+
+    def _offer(self, plan, source='local'):
+        if not isinstance(plan, Plan) or not isinstance(plan.actions, tuple):
+            raise BrokerError('Invalid plan.')
+        if plan.intent:
+            if plan.actions or plan.intent not in {'find_app', 'file_workspace'} or clean(plan.query, 300) != plan.query:
+                raise BrokerError('Invalid follow-up intent.')
+        elif plan.query:
+            raise BrokerError('Unexpected follow-up query.')
+        if len(plan.actions) > 1:
+            raise BrokerError('Multi-action execution is disabled.')
+        for action in plan.actions:
+            validate(action)
+        result = plan.to_dict()
+        result.update(destinations=[self.executor.describe(a) if a.kind in {'installed_app', 'workspace_patch'} else destination(a)
+                                   for a in plan.actions],
+                      approval_id=None, expires_in=0, source=source)
+        if plan.actions:
+            if self.paused:
+                raise BrokerError('Actions are paused. Resume explicitly to create an approval.')
+            pending = Pending(secrets.token_urlsafe(24), plan, self.clock() + self.ttl)
+            self.pending = pending
+            result.update(approval_id=pending.id, expires_in=self.ttl)
+            self._record(plan.title, 'awaiting approval')
+        return result
+
     def plan(self, text, browser='default'):
         with self._lock:
-            # New requests invalidate old approvals, even if parsing fails.
-            if self.pending:
-                self._record(self.pending.plan.title, 'superseded')
-                self.pending = None
+            # Even invalid requests revoke any older proposal or waiting consent.
+            self._invalidate()
             if self._execution_lock.locked():
                 raise BrokerError('Finish the Windows approval dialog before sending another request.')
-            plan = plan_request(text, browser)
-            for action in plan.actions:
-                validate(action)
-            if len(plan.actions) > 1:
-                raise BrokerError('Multi-action execution is disabled.')
-            result = plan.to_dict()
-            result['destinations'] = [destination(a) for a in plan.actions]
-            result['approval_id'] = None
-            result['expires_in'] = 0
-            if plan.actions:
-                if self.paused:
-                    raise BrokerError('Actions are paused. Resume explicitly to create an approval.')
-                pending = Pending(secrets.token_urlsafe(24), plan, self.clock() + self.ttl)
-                self.pending = pending
-                result.update(approval_id=pending.id, expires_in=self.ttl)
-                self._record(plan.title, 'awaiting approval')
-            return result
+            return self._offer(plan_request(text, browser))
+
+    def select_app(self, token):
+        """Native picker entry only. Selection is not approval and cannot execute."""
+        with self._lock:
+            self._invalidate()
+            if self.demo or self._execution_lock.locked():
+                raise BrokerError('App selection is unavailable in demo mode or during approval.')
+            try:
+                target = self.executor.catalog.get(token)
+            except Exception as exc:
+                raise BrokerError('App selection expired or could not be resolved. Scan and select it again.') from None
+            from .executable_target import ExecutableTarget
+            is_executable = isinstance(target, ExecutableTarget)
+            if not is_executable and not target.packaged:
+                raise BrokerError('Classic Start-menu shortcuts may hide arguments. Select the actual .exe instead.')
+            name = target.name
+            note = ('Review the locally observed Windows app registration. Its publisher/signature are not verified.'
+                    if not is_executable else
+                    'Launching this selected executable runs its code with your Windows user permissions. '
+                    'Review its complete path/hash and confirm it is trustworthy.')
+            return self._offer(Plan('Launch ' + name, note, (Action('installed_app', token),)))
+
+    def offer_patch_export(self, token):
+        """Native UI only: exact reviewed patch destination, one-use approval."""
+        with self._lock:
+            self._invalidate()
+            if self.demo or self._execution_lock.locked():
+                raise BrokerError('Patch export is unavailable in demo mode or during approval.')
+            return self._offer(Plan('Export reviewed patch',
+                'Creates a new patch outside the project after Windows consent. Original files remain unchanged.',
+                (Action('workspace_patch', token),)))
+
+    def begin_interpretation(self):
+        with self._lock:
+            self._invalidate()
+            if self.demo:
+                raise BrokerError('AI is disabled in demo mode.')
+            if self.paused or self._execution_lock.locked():
+                raise BrokerError('Resume actions and finish any approval before asking AI to plan.')
+            ticket = secrets.token_urlsafe(24)
+            self._interpretation = (ticket, self._generation, self.clock() + self.ttl)
+            return ticket
+
+    def complete_interpretation(self, ticket, plan):
+        """Accept a validated proposal, never execute it. A ticket is consumed once."""
+        with self._lock:
+            pending = self._interpretation
+            if (not pending or not isinstance(ticket, str) or not secrets.compare_digest(ticket, pending[0])
+                    or pending[1] != self._generation or self.clock() >= pending[2]
+                    or self.paused or self._execution_lock.locked()):
+                raise BrokerError('AI result discarded because the request changed or was cancelled.')
+            self._interpretation = None
+            self._generation += 1
+            if any(a.kind in {'installed_app', 'workspace_patch'} for a in plan.actions):
+                raise BrokerError('AI cannot supply local selection handles. Use the native picker.')
+            return self._offer(plan, source='ai')
 
     def confirm(self, approval_id):
         if not self._execution_lock.acquire(blocking=False):
@@ -129,6 +206,7 @@ class Broker:
             self._expire()
             if self.pending and secrets.compare_digest(self.pending.id, approval_id):
                 self._record(self.pending.plan.title, 'cancelled')
+                self._generation += 1
                 self.pending = None
                 return {'message': 'Cancelled. No action was dispatched.'}
             raise BrokerError('This approval is no longer pending.')
@@ -136,6 +214,7 @@ class Broker:
     def pause(self, enabled):
         with self._lock:
             self.paused = enabled
+            self._interpretation = None
             self._generation += 1
             if enabled:
                 self.pending = None
@@ -147,6 +226,7 @@ class Broker:
     def clear(self):
         with self._lock:
             self.pending = None
+            self._interpretation = None
             self._generation += 1
             self._events.clear()
         return {'message': 'Session activity and pending approval cleared.'}
