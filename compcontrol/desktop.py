@@ -159,19 +159,23 @@ class DesktopApp:
         self.card = tk.Frame(shell, bg=PANEL, padx=16, pady=12)
         self.card.pack(fill='both', expand=True, pady=(12, 10))
         tk.Label(self.card, textvariable=self.title, font=('Segoe UI', 14, 'bold'),
-                 bg=PANEL, fg=FG, anchor='w', wraplength=490).pack(fill='x')
+                 bg=PANEL, fg=FG, anchor='w', wraplength=490).pack(side='top', fill='x')
+
+        # Pack the bottom elements first so they are never pushed off-screen
+        action_row = tk.Frame(self.card, bg=PANEL)
+        action_row.pack(side='bottom', fill='x')
+        tk.Label(self.card, textvariable=self.approval_status, bg=PANEL, fg=MUTED,
+                 anchor='w', wraplength=490, font=('Segoe UI', 9)).pack(side='bottom', fill='x', pady=(8, 6))
+
         content = tk.Frame(self.card, bg=PANEL)
-        content.pack(fill='both', expand=True, pady=(10, 0))
+        content.pack(side='top', fill='both', expand=True, pady=(10, 0))
         self.output = tk.Text(content, bg=PANEL, fg=FG, relief='flat', wrap='word',
                               height=4, font=('Segoe UI', 11), state='disabled', cursor='arrow')
         scroll = ttk.Scrollbar(content, command=self.output.yview)
         self.output.configure(yscrollcommand=scroll.set)
         scroll.pack(side='right', fill='y')
-        self.output.pack(fill='both', expand=True)
-        tk.Label(self.card, textvariable=self.approval_status, bg=PANEL, fg=MUTED,
-                 anchor='w', wraplength=490, font=('Segoe UI', 9)).pack(fill='x', pady=(8, 6))
-        action_row = tk.Frame(self.card, bg=PANEL)
-        action_row.pack(fill='x')
+        self.output.pack(side='left', fill='both', expand=True)
+
         self.review_button = self._button(action_row, 'Review & approve…', self.confirm, primary=True)
         self.review_button.pack(side='left')
         self.review_button.configure(state='disabled')
