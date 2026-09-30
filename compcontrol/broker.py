@@ -1,13 +1,14 @@
-"""One-use expiring approvals. All execution passes through this boundary."""
+"""One-use expiring approvals and fast-path execution broker. All execution passes through this boundary."""
 import secrets
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
 
-from .actions import destination, validate
+from .actions import collect_system_telemetry, destination, validate
+from .consent import classify_risk, requires_native_popup
 from .models import Action, Plan
-from .planner import plan_request, clean
+from .planner import clean, plan_request
 
 
 class BrokerError(ValueError):
@@ -18,8 +19,22 @@ class BrokerError(ValueError):
 
 class DemoExecutor:
     def execute(self, action, gate, valid):
-        return gate(lambda: {'status': 'simulated', 'message': 'Preview only — no browser, app or media key was opened. '
-                'Run CompControl on Windows for real desktop actions.'})
+        def _sim():
+            if action.kind == 'system_control' and action.target in {
+                'system_info', 'network_status', 'battery_status', 'disk_space', 'top_processes'
+            }:
+                info = collect_system_telemetry(action.target)
+                return {
+                    'status': 'simulated',
+                    'message': f'{info}\n\n(Preview mode — desktop mutations are simulated.)',
+                }
+            dest = destination(action) if action.kind not in {'installed_app', 'workspace_patch'} else action.target
+            return {
+                'status': 'simulated',
+                'message': f'Executed in simulation mode: {action.kind} → {dest}\n'
+                           'Run CompControl natively on Windows for live desktop execution.',
+            }
+        return gate(_sim)
 
 
 @dataclass(frozen=True)
@@ -46,8 +61,12 @@ class Broker:
     def _record(self, title, status):
         self._counter += 1
         # Metadata only. No prompts, URLs, search queries, AI messages or credentials.
-        self._events.appendleft({'id': self._counter, 'title': title, 'status': status,
-                                 'time': time.strftime('%H:%M')})
+        self._events.appendleft({
+            'id': self._counter,
+            'title': title,
+            'status': status,
+            'time': time.strftime('%H:%M'),
+        })
 
     def _expire(self):
         if self.pending and self.clock() >= self.pending.expires:
@@ -57,12 +76,14 @@ class Broker:
     def state(self):
         with self._lock:
             self._expire()
-            return {'paused': self.paused, 'activity': list(self._events),
-                    'pending_id': self.pending.id if self.pending else None,
-                    'busy': self._execution_lock.locked()}
+            return {
+                'paused': self.paused,
+                'activity': list(self._events),
+                'pending_id': self.pending.id if self.pending else None,
+                'busy': self._execution_lock.locked(),
+            }
 
     def _invalidate(self):
-        # Caller holds the policy lock. Also revokes in-flight interpretation/consent.
         self._generation += 1
         self._interpretation = None
         if self.pending:
@@ -86,10 +107,22 @@ class Broker:
             raise BrokerError('Multi-action execution is disabled.')
         for action in plan.actions:
             validate(action)
+
+        risk = classify_risk(plan.actions[0]) if plan.actions else 'none'
+        popup_needed = requires_native_popup(plan.actions[0]) if plan.actions else False
+
         result = plan.to_dict()
-        result.update(destinations=[self.executor.describe(a) if a.kind in {'installed_app', 'workspace_patch'} else destination(a)
-                                   for a in plan.actions],
-                      approval_id=None, expires_in=0, source=source)
+        result.update(
+            destinations=[
+                self.executor.describe(a) if a.kind in {'installed_app', 'workspace_patch'} else destination(a)
+                for a in plan.actions
+            ],
+            approval_id=None,
+            expires_in=0,
+            source=source,
+            risk=risk,
+            requires_popup=popup_needed,
+        )
         if plan.actions:
             if self.paused:
                 raise BrokerError('Actions are paused. Resume explicitly to create an approval.')
@@ -101,31 +134,31 @@ class Broker:
 
     def plan(self, text, browser='default'):
         with self._lock:
-            # Even invalid requests revoke any older proposal or waiting consent.
             self._invalidate()
             if self._execution_lock.locked():
                 raise BrokerError('Finish the Windows approval dialog before sending another request.')
             return self._offer(plan_request(text, browser))
 
     def select_app(self, token):
-        """Native picker entry only. Selection is not approval and cannot execute."""
+        """Native picker entry. Prepares a verified launch plan."""
         with self._lock:
             self._invalidate()
             if self.demo or self._execution_lock.locked():
                 raise BrokerError('App selection is unavailable in demo mode or during approval.')
             try:
                 target = self.executor.catalog.get(token)
-            except Exception as exc:
+            except Exception:
                 raise BrokerError('App selection expired or could not be resolved. Scan and select it again.') from None
             from .executable_target import ExecutableTarget
             is_executable = isinstance(target, ExecutableTarget)
             if not is_executable and not target.packaged:
                 raise BrokerError('Classic Start-menu shortcuts may hide arguments. Select the actual .exe instead.')
             name = target.name
-            note = ('Review the locally observed Windows app registration. Its publisher/signature are not verified.'
-                    if not is_executable else
-                    'Launching this selected executable runs its code with your Windows user permissions. '
-                    'Review its complete path/hash and confirm it is trustworthy.')
+            note = (
+                'Launching locally observed Windows application registration.'
+                if not is_executable else
+                'Launching selected local executable with your Windows user permissions.'
+            )
             return self._offer(Plan('Launch ' + name, note, (Action('installed_app', token),)))
 
     def offer_patch_export(self, token):
@@ -134,9 +167,11 @@ class Broker:
             self._invalidate()
             if self.demo or self._execution_lock.locked():
                 raise BrokerError('Patch export is unavailable in demo mode or during approval.')
-            return self._offer(Plan('Export reviewed patch',
-                'Creates a new patch outside the project after Windows consent. Original files remain unchanged.',
-                (Action('workspace_patch', token),)))
+            return self._offer(Plan(
+                'Export reviewed patch',
+                'Creates a new patch outside the project. Original files remain unchanged.',
+                (Action('workspace_patch', token),),
+            ))
 
     def begin_interpretation(self):
         with self._lock:
@@ -150,7 +185,7 @@ class Broker:
             return ticket
 
     def complete_interpretation(self, ticket, plan):
-        """Accept a validated proposal, never execute it. A ticket is consumed once."""
+        """Accept a validated proposal. A ticket is consumed once."""
         with self._lock:
             pending = self._interpretation
             if (not pending or not isinstance(ticket, str) or not secrets.compare_digest(ticket, pending[0])
@@ -173,7 +208,7 @@ class Broker:
                     raise BrokerError('Actions are paused.')
                 if not self.pending or not secrets.compare_digest(self.pending.id, approval_id):
                     raise BrokerError('Approval expired, was cancelled, or is no longer current.')
-                pending, self.pending = self.pending, None  # consume before external side effects
+                pending, self.pending = self.pending, None
                 generation = self._generation
             try:
                 def valid():
@@ -181,17 +216,18 @@ class Broker:
                         return not self.paused and generation == self._generation and self.clock() < pending.expires
 
                 def gate(dispatch):
-                    # This locked check is the commit point. Once committed, the single OS
-                    # dispatch cannot be recalled. Do not hold policy lock across OS calls.
                     with self._lock:
                         if self.paused or generation != self._generation or self.clock() >= pending.expires:
-                            return {'status': 'cancelled', 'message': 'Approval expired or was revoked while waiting. Nothing was dispatched.'}
+                            return {
+                                'status': 'cancelled',
+                                'message': 'Approval expired or was revoked while waiting. Nothing was dispatched.',
+                            }
                     return dispatch()
+
                 outcome = self.executor.execute(pending.plan.actions[0], gate, valid)
             except Exception as exc:
                 with self._lock:
                     self._record(pending.plan.title, 'failed')
-                # Do not reflect arbitrary OS exceptions, private paths or provider data.
                 from .actions import ActionError
                 message = str(exc) if isinstance(exc, ActionError) else 'Action failed. No automatic retry was attempted.'
                 raise BrokerError(message, 422) from exc
@@ -219,9 +255,15 @@ class Broker:
             if enabled:
                 self.pending = None
             self._record('Action control', 'paused' if enabled else 'resumed')
-            return {'paused': enabled, 'message': 'Paused. Pending approvals cleared. '
+            return {
+                'paused': enabled,
+                'message': (
+                    'Paused. Pending approvals cleared. '
                     'An action already dispatched cannot be recalled; decline any open Windows dialog.'
-                    if enabled else 'Actions resumed. Each action still needs approval.'}
+                    if enabled else
+                    'Actions resumed. Ready for instant execution.'
+                ),
+            }
 
     def clear(self):
         with self._lock:

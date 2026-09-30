@@ -64,10 +64,12 @@ class DesktopTests(unittest.TestCase):
         self.app.settings()
         win = self.app.settings_window
         self.root.update()
+
         def descendants(widget):
             for child in widget.winfo_children():
                 yield child
                 yield from descendants(child)
+
         widgets = list(descendants(win))
         picker = next(w for w in widgets if w.winfo_class() == 'TCombobox')
         fields = [w for w in widgets if w.winfo_class() == 'Entry']
@@ -88,14 +90,29 @@ class DesktopTests(unittest.TestCase):
         self.app.interpret()
         self.assertIsNone(self.app.pending)
 
-    def test_ai_worker_proposal_requires_approval_and_edits_discard(self):
+    def test_ai_worker_auto_approves_by_default_and_manual_when_toggled(self):
         self.app.demo = False
         self.app.broker = Broker(DemoExecutor())
         provider = Mock()
         provider.config = ProviderConfig('ollama', 'http://127.0.0.1:11434', 'fake-model')
         provider.propose.return_value = Plan('Open Calculator', 'Local summary', (Action('app', 'calculator'),))
         self.app.provider = provider
+
+        # 1. With Auto-Approve ON (default), interpret() executes directly without intermediate click
+        self.app.auto_approve.set(True)
         self.app.request.set('could you bring up my calculator please')
+        self.app.interpret()
+        deadline = time.monotonic() + 3
+        while self.app.ai_busy and time.monotonic() < deadline:
+            self.root.update()
+            time.sleep(.01)
+        self.assertFalse(self.app.ai_busy)
+        self.assertIsNone(self.app.pending)
+        self.assertEqual(self.app.title.get(), 'Simulated')
+
+        # 2. With Auto-Approve OFF, proposal waits for confirmation and edits discard it
+        self.app.auto_approve.set(False)
+        self.app.request.set('open calculator manually')
         with patch('compcontrol.desktop.messagebox.askokcancel', return_value=True):
             self.app.interpret()
         deadline = time.monotonic() + 3
@@ -107,15 +124,15 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(self.app.title.get().startswith('AI proposal'))
         self.app.request.set('a different request')
         self.assertIsNone(self.app.pending)
-        # A late worker result is silently discarded instead of replacing the edited request.
         self.app.ai_busy = True
         self.app.mailbox.put((self.app.revision - 1, 'stale', provider.propose.return_value, None))
         self.root.after_cancel(self.app.timer)
         self.app._tick()
         self.assertIsNone(self.app.pending)
 
-    def test_declined_disclosure_never_calls_provider(self):
+    def test_declined_disclosure_never_calls_provider_when_auto_approve_off(self):
         self.app.demo = False
+        self.app.auto_approve.set(False)
         provider = Mock()
         provider.config = ProviderConfig('ollama', 'http://127.0.0.1:11434', 'fake-model')
         self.app.provider = provider

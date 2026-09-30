@@ -19,22 +19,37 @@ from compcontrol.providers import TextProvider, ProviderConfig, ProviderError
 
 
 class IntentTests(unittest.TestCase):
-    def test_unknown_app_requests_discovery_not_permission(self):
+    def test_unknown_app_triggers_background_discovery_and_direct_launch(self):
         plan = plan_request('open Visual Studio Code')
-        self.assertEqual(plan.intent, 'find_app')
-        self.assertEqual(plan.query, 'Visual Studio Code')
-        self.assertFalse(plan.actions)
-        ai = parse_proposal('{"intent":"find_app","query":"Blender"}')
-        self.assertEqual(ai.intent, 'find_app')
-        self.assertFalse(ai.actions)
+        self.assertEqual(len(plan.actions), 1)
+        self.assertEqual(plan.actions[0].kind, 'launch_app')
+        self.assertEqual(plan.actions[0].target, 'vscode')
+        self.assertEqual(plan.actions[0].query, 'Visual Studio Code')
 
-    def test_install_and_download_find_only_web_results(self):
-        for text in ('install Blender', 'download the VLC for Windows',
-                     'download and install Blender', 'winget install VLC'):
+        ai = parse_proposal('{"intent":"find_app","query":"Blender"}')
+        self.assertEqual(len(ai.actions), 1)
+        self.assertEqual(ai.actions[0].kind, 'launch_app')
+        self.assertEqual(ai.actions[0].target, 'blender')
+
+        # When discover() returns a matching Windows Start-menu AppID, auto_resolve_app binds it directly
+        with patch('compcontrol.installed_apps.discover', return_value=(
+            InstalledApp('Custom Studio', 'Vendor.CustomStudio_abcdefghijklm!App', True),
+        )):
+            resolved = parse_proposal('{"action":{"kind":"launch_app","target":"Custom Studio","query":""}}')
+            self.assertEqual(resolved.actions[0].kind, 'launch_app')
+            self.assertEqual(resolved.actions[0].target, 'Vendor.CustomStudio_abcdefghijklm!App')
+            self.assertEqual(resolved.actions[0].query, 'Custom Studio')
+
+    def test_install_and_download_use_native_winget_installer(self):
+        for text, expected_pkg in (
+            ('install Blender', 'BlenderFoundation.Blender'),
+            ('download the VLC for Windows', 'VideoLAN.VLC'),
+            ('download and install Blender', 'BlenderFoundation.Blender'),
+            ('winget install VLC', 'VideoLAN.VLC'),
+        ):
             plan = plan_request(text)
-            self.assertEqual((plan.actions[0].kind, plan.actions[0].target), ('search', 'google'))
-            self.assertIn('official download Windows', plan.actions[0].query)
-            self.assertIn('has not downloaded', plan.message)
+            self.assertEqual((plan.actions[0].kind, plan.actions[0].target), ('winget_install', expected_pkg))
+            self.assertIn('winget', plan.message.lower())
         link = plan_request('download from https://example.org/setup.exe')
         self.assertEqual(link.actions[0].kind, 'navigate')
         self.assertEqual(link.actions[0].target, 'https://example.org/setup.exe')

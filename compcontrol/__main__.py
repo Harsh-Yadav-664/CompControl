@@ -13,8 +13,8 @@ def cli(demo=False):
         from .actions import WindowsExecutor
         executor = WindowsExecutor()
     broker = Broker(executor, demo=demo)
-    print(f'CompControl • {"DEMO: no desktop effects" if demo else "Windows local mode"}')
-    print('Type help. Every desktop action needs approval. Type quit or Ctrl+C to stop.')
+    print(f'CompControl • {"DEMO: simulation mode" if demo else "Windows Autonomous Mode"}')
+    print('Type any command (or help). Safe actions run immediately; high-impact actions ask first. Type quit to exit.')
     try:
         while True:
             text = input('\nYou > ')
@@ -27,8 +27,10 @@ def cli(demo=False):
                 plan = broker.plan(text)
                 print(plan['title'] + '\n' + plan['message'])
                 if plan['approval_id']:
-                    print('Exact destination: ' + '\n'.join(plan['destinations']))
-                    if input('Type APPROVE to allow this once, anything else to cancel: ') == 'APPROVE':
+                    print('Destination: ' + '\n'.join(plan['destinations']))
+                    if not plan.get('requires_popup', False):
+                        print(broker.confirm(plan['approval_id'])['message'])
+                    elif input('High-impact action. Type APPROVE to allow once, anything else to cancel: ') == 'APPROVE':
                         print(broker.confirm(plan['approval_id'])['message'])
                     else:
                         print(broker.cancel(plan['approval_id'])['message'])
